@@ -9,6 +9,8 @@ const container = document.getElementById('canvas-container');
 const wrapper = document.getElementById('canvas-wrapper');
 const canvas = document.getElementById('place-canvas');
 const ctx = canvas.getContext('2d', { alpha: false });
+const previewCanvas = document.getElementById('preview-canvas');
+const previewCtx = previewCanvas.getContext('2d', { alpha: true });
 
 // キャンバス設定 (5000x5000のキャンバス上に、1マスの大きさを10で描画＝500x500グリッド=25万マス)
 const CANVAS_SIZE = 5000;
@@ -17,7 +19,11 @@ const PIXEL_SIZE = CANVAS_SIZE / GRID_SIZE; // 1マス10px
 
 // アプリケーションの状態
 let myColor = '#000000';
-let activeTool = 'draw'; // 'draw' または 'move'
+let activeTool = 'draw'; // 'draw', 'move', or 'image'
+let stampPixels = null; // 画像変換後のピクセル情報、管理者専用
+
+// 管理者フラグ (?admin=true で起動)
+const isAdmin = new URLSearchParams(window.location.search).get('admin') === 'true';
 
 // ビューポート（移動・ズーム）の状態
 let scale = 1;
@@ -53,7 +59,6 @@ async function init() {
   updateTransform();
   setupUI();
 
-  // 既存のドットをロード
   const { data: pixels, error } = await supabase.from('pixels').select('id, x, y, color');
   if (error) {
     console.error('データの取得に失敗しました:', error);
@@ -61,7 +66,6 @@ async function init() {
     pixels.forEach(p => drawPixelLocal(p.x, p.y, p.color));
   }
 
-  // リアルタイム購読
   supabase
     .channel('public:pixels')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'pixels' }, payload => {
@@ -85,7 +89,6 @@ function putPixel(x, y) {
   drawPixelLocal(x, y, myColor);
   
   const id = `${x}_${y}`;
-  // 非同期で送信。待たずに次へ
   supabase.from('pixels').upsert({ id, x, y, color: myColor }).then(({ error }) => {
     if (error) console.error('ドットの配置に失敗:', error);
   });
@@ -107,38 +110,69 @@ function drawLine(x0, y0, x1, y1) {
   }
 }
 
-// --- 高度なマルチタッチ・マウスイベントリスナー管理 --- //
-// 画面に触れている指（またはマウス）の情報を管理・追跡する
+// --- イベントリスナー管理 --- //
 const activePointers = new Map();
-
-// シングルタップ（1本指）での描画・パン用の状態
 let isDrawingPhase = false;
 let isPanningPhase = false;
 let lastLogicalX = null;
 let lastLogicalY = null;
 let lastPanX = 0;
 let lastPanY = 0;
-
-// マルチタッチ（2本指以上）でのパン・ズーム状態
 let lastPinchCenter = null;
 let lastPinchDistance = null;
+
+function renderPreviewOverlay(clientX, clientY) {
+  previewCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+  if (activeTool !== 'image' || !stampPixels) return;
+
+  const { x: gridX, y: gridY } = getLogicalPos(clientX, clientY);
+  stampPixels.forEach(p => {
+    const px = gridX + p.dx;
+    const py = gridY + p.dy;
+    if (px >= 0 && px < GRID_SIZE && py >= 0 && py < GRID_SIZE) {
+      previewCtx.fillStyle = p.color;
+      previewCtx.fillRect(px * PIXEL_SIZE, py * PIXEL_SIZE, PIXEL_SIZE, PIXEL_SIZE);
+    }
+  });
+}
 
 function handlePointerDown(e) {
   // UI上の操作はキャンバスイベントとして発火しない
   if (e.target.closest('#ui-container')) return;
   
-  // ポインターを記録（Chrome等のマルチタッチ対応）
   activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
   if (activePointers.size === 1) {
     // 【1本指・クリック】
-    // 中/右クリック、または「移動ツール」が選択されている場合
     const isForcePan = e.button === 1 || e.button === 2;
     if (activeTool === 'move' || isForcePan) {
       isPanningPhase = true;
       isDrawingPhase = false;
       lastPanX = e.clientX;
       lastPanY = e.clientY;
+    } else if (activeTool === 'image' && stampPixels) {
+      // 一括画像スタンプの配置処理
+      const { x: gridX, y: gridY } = getLogicalPos(e.clientX, e.clientY);
+      const newRows = [];
+      
+      stampPixels.forEach(p => {
+        const px = gridX + p.dx;
+        const py = gridY + p.dy;
+        if (px >= 0 && px < GRID_SIZE && py >= 0 && py < GRID_SIZE) {
+          drawPixelLocal(px, py, p.color);
+          newRows.push({ id: `${px}_${py}`, x: px, y: py, color: p.color });
+        }
+      });
+
+      if (newRows.length > 0) {
+        // バルクインサート（一括送信）
+        supabase.from('pixels').upsert(newRows).then(({ error }) => {
+          if (error) console.error('スタンプレースに失敗:', error);
+        });
+      }
+      isDrawingPhase = false;
+      isPanningPhase = false;
+
     } else {
       isPanningPhase = false;
       isDrawingPhase = true;
@@ -149,7 +183,6 @@ function handlePointerDown(e) {
     }
   } else if (activePointers.size === 2) {
     // 【2本指】
-    // 描画モード中であっても2本目の指が置かれたらすべてキャンセリングし、ズーム＆パンに移行
     isDrawingPhase = false;
     isPanningPhase = false;
     
@@ -162,7 +195,11 @@ function handlePointerDown(e) {
 }
 
 function handlePointerMove(e) {
-  if (!activePointers.has(e.pointerId)) return;
+  // マウスホバー処理（プレビューを描画する）
+  if (!activePointers.has(e.pointerId)) {
+    if (activeTool === 'image') renderPreviewOverlay(e.clientX, e.clientY);
+    return;
+  }
   
   // ポインター位置の更新
   activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -170,7 +207,6 @@ function handlePointerMove(e) {
   if (activePointers.size === 1) {
     // 【1本指】
     if (isPanningPhase) {
-      // 画面の移動処理
       const dx = e.clientX - lastPanX;
       const dy = e.clientY - lastPanY;
       translateX += dx;
@@ -179,21 +215,24 @@ function handlePointerMove(e) {
       lastPanY = e.clientY;
       updateTransform();
     } else if (isDrawingPhase) {
-      // 描画処理
       const { x, y } = getLogicalPos(e.clientX, e.clientY);
       if (x !== lastLogicalX || y !== lastLogicalY) {
         if (lastLogicalX !== null && lastLogicalY !== null) {
-          drawLine(lastLogicalX, lastLogicalY, x, y); // スキマを埋める
+          drawLine(lastLogicalX, lastLogicalY, x, y); 
         } else {
           putPixel(x, y);
         }
         lastLogicalX = x;
         lastLogicalY = y;
       }
+    } else if (activeTool === 'image') {
+       // ドラッグ中にも一応プレビューを更新する
+       renderPreviewOverlay(e.clientX, e.clientY);
     }
+
   } else if (activePointers.size === 2) {
     // 【2本指】
-    e.preventDefault(); // デフォルトのスクロールなどを必ず防ぐ
+    e.preventDefault(); 
     
     const ptrs = Array.from(activePointers.values());
     const [p1, p2] = ptrs;
@@ -202,19 +241,15 @@ function handlePointerMove(e) {
     const currentCenter = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
 
     if (lastPinchCenter && lastPinchDistance) {
-      // 1. 移動（パン）
       const dx = currentCenter.x - lastPinchCenter.x;
       const dy = currentCenter.y - lastPinchCenter.y;
       translateX += dx;
       translateY += dy;
 
-      // 2. ズーム（拡大・縮小）
       if (lastPinchDistance > 0) {
         const zoomFactor = currentDistance / lastPinchDistance;
         let newScale = scale * zoomFactor;
         newScale = Math.max(MIN_SCALE, Math.min(newScale, MAX_SCALE));
-        
-        // 2本指の中心を基準にズーム
         translateX = currentCenter.x - (currentCenter.x - translateX) * (newScale / scale);
         translateY = currentCenter.y - (currentCenter.y - translateY) * (newScale / scale);
         scale = newScale;
@@ -223,23 +258,17 @@ function handlePointerMove(e) {
       updateTransform();
     }
     
-    // 次回の基準として保存
     lastPinchDistance = currentDistance;
     lastPinchCenter = currentCenter;
   }
 }
 
 function handlePointerUpOrCancel(e) {
-  // 離れたポインターを削除
   activePointers.delete(e.pointerId);
-
-  // 指の数が減ったらマルチタッチ状態をリセット
   if (activePointers.size < 2) {
     lastPinchCenter = null;
     lastPinchDistance = null;
   }
-
-  // もし1本の指が離れ、もう1本が残っているとしても一旦リセットする（不自然な挙動を防ぐ）
   if (activePointers.size === 0 || activePointers.size === 1) {
     isDrawingPhase = false;
     isPanningPhase = false;
@@ -248,7 +277,6 @@ function handlePointerUpOrCancel(e) {
   }
 }
 
-// マウスホイールでのズーム
 function handleWheel(evt) {
   if (evt.target.closest('#ui-container')) return;
   evt.preventDefault();
@@ -259,7 +287,6 @@ function handleWheel(evt) {
   let newScale = scale * Math.exp(delta);
   newScale = Math.max(MIN_SCALE, Math.min(newScale, MAX_SCALE));
 
-  // マウスカーソルの位置を中心にズームする計算
   const mouseX = evt.clientX;
   const mouseY = evt.clientY;
   
@@ -268,60 +295,127 @@ function handleWheel(evt) {
   scale = newScale;
   
   updateTransform();
+
+  // ズーム後もプレビューを正しい位置へ描画
+  if (activeTool === 'image') renderPreviewOverlay(mouseX, mouseY);
 }
 
-// イベントリスナー登録 (Pointer Events APIを使用)
+// イベントリスナー登録
 container.addEventListener('pointerdown', handlePointerDown);
-// move, up, cancel は画面外でも追従できるように window にバインド
 window.addEventListener('pointermove', handlePointerMove, { passive: false });
 window.addEventListener('pointerup', handlePointerUpOrCancel);
 window.addEventListener('pointercancel', handlePointerUpOrCancel);
 container.addEventListener('wheel', handleWheel, { passive: false });
-
 container.addEventListener('contextmenu', e => {
-  if (!e.target.closest('#ui-container')) e.preventDefault(); // キャンバス上の右クリックメニューを無効化（移動に使うため）
+  if (!e.target.closest('#ui-container')) e.preventDefault(); 
 });
 
 // --- UI セットアップ --- //
 function setupUI() {
   const btnDraw = document.getElementById('btn-draw');
   const btnMove = document.getElementById('btn-move');
+  const btnImage = document.getElementById('btn-image');
+  const imageUpload = document.getElementById('image-upload');
   
+  // ?admin=true なら管理者ツールを表示
+  if (isAdmin) {
+    btnImage.style.display = 'block';
+  }
+
   function switchTool(tool) {
     activeTool = tool;
     btnDraw.classList.toggle('active', tool === 'draw');
     btnMove.classList.toggle('active', tool === 'move');
-    container.style.cursor = tool === 'draw' ? 'crosshair' : 'grab';
+    btnImage.classList.toggle('active', tool === 'image');
+    
+    if (tool === 'move') {
+      container.style.cursor = 'grab';
+    } else if (tool === 'draw') {
+      container.style.cursor = 'crosshair';
+    } else if (tool === 'image') {
+      // スタンププレビューを見やすくするためカーソルを非表示
+      container.style.cursor = 'none';
+    }
+    
+    if (tool !== 'image') {
+      previewCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+    }
   }
 
   btnDraw.addEventListener('click', () => switchTool('draw'));
   btnMove.addEventListener('click', () => switchTool('move'));
+  btnImage.addEventListener('click', () => imageUpload.click());
+
+  // 画像アップロード・変換処理
+  imageUpload.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      
+      // データベース負荷軽減のため、最大50x50ピクセルまで強制的に圧縮
+      const MAX_STAMP_SIZE = 50; 
+      let w = img.width;
+      let h = img.height;
+      if (w > MAX_STAMP_SIZE || h > MAX_STAMP_SIZE) {
+        const ratio = Math.min(MAX_STAMP_SIZE / w, MAX_STAMP_SIZE / h);
+        w = Math.floor(w * ratio);
+        h = Math.floor(h * ratio);
+      }
+      
+      const offCanvas = document.createElement('canvas');
+      offCanvas.width = w;
+      offCanvas.height = h;
+      const offCtx = offCanvas.getContext('2d');
+      offCtx.drawImage(img, 0, 0, w, h);
+      
+      const imgData = offCtx.getImageData(0, 0, w, h).data;
+      stampPixels = [];
+      
+      // 画像ピクセルを相対座標ドット一覧に変換
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = (y * w + x) * 4;
+          const r = imgData[i];
+          const g = imgData[i+1];
+          const b = imgData[i+2];
+          const a = imgData[i+3];
+          
+          if (a > 128) { // 半透明以下のピクセルは無視
+            const hex = '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+            // マウスカーソルが中心になるよう dx, dy をオフセット
+            stampPixels.push({ dx: x - Math.floor(w/2), dy: y - Math.floor(h/2), color: hex });
+          }
+        }
+      }
+      switchTool('image');
+      imageUpload.value = ''; // 同じ画像でも繰り返し選択できるようにリセット
+    };
+    img.src = url;
+  });
   
-  // ショートカットキー対応 (P = Draw, H = Move)
   window.addEventListener('keydown', (e) => {
-    // インプット中に発火しないよう制御
     if (e.target.tagName.toLowerCase() === 'input') return;
-    
     if (e.key.toLowerCase() === 'p') switchTool('draw');
     if (e.key.toLowerCase() === 'h') switchTool('move');
   });
 
-  // 色パレットとピッカー
   const swatches = document.querySelectorAll('.color-swatch');
   const colorPicker = document.getElementById('color-picker');
 
-  // 色変更処理
   function setColor(color, triggerEl) {
     myColor = color;
     swatches.forEach(s => s.classList.remove('active'));
     if (triggerEl && triggerEl.classList.contains('color-swatch')) {
       triggerEl.classList.add('active');
     }
-    colorPicker.value = color; // ピッカーの色も同期
-    switchTool('draw'); // 色を変えたら自動的に描画ツールに切り替え
+    colorPicker.value = color; 
+    switchTool('draw'); 
   }
 
-  // デフォルト色を選択状態に
   setColor('#000000', swatches[0]);
 
   swatches.forEach(swatch => {
