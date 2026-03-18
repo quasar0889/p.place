@@ -7,8 +7,33 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <!-- Canvas Area -->
   <div id="canvas-container">
-    <canvas id="place-canvas" width="1000" height="1000"></canvas>
+    <div id="canvas-wrapper">
+      <canvas id="place-canvas" width="5000" height="5000"></canvas>
+    </div>
+  </div>
+  
+  <!-- Floating UI -->
+  <div id="ui-container">
+    <div id="tools">
+      <button id="btn-draw" class="tool-btn active" title="描画ツール (P)">✏️ 描く</button>
+      <button id="btn-move" class="tool-btn" title="移動ツール (H)">✋ 動かす</button>
+    </div>
+    
+    <div id="palette">
+      <button class="color-swatch" style="background-color: #000000;" data-color="#000000"></button>
+      <button class="color-swatch" style="background-color: #ffffff;" data-color="#ffffff"></button>
+      <button class="color-swatch" style="background-color: #ff4500;" data-color="#ff4500"></button>
+      <button class="color-swatch" style="background-color: #ffd700;" data-color="#ffd700"></button>
+      <button class="color-swatch" style="background-color: #32cd32;" data-color="#32cd32"></button>
+      <button class="color-swatch" style="background-color: #00bfff;" data-color="#00bfff"></button>
+      <button class="color-swatch" style="background-color: #9400d3;" data-color="#9400d3"></button>
+      
+      <div class="color-picker-wrapper">
+        <input type="color" id="color-picker" value="#000000" title="カスタムカラー">
+      </div>
+    </div>
   </div>
   
   <!-- Supabase JS Client v2 -->
