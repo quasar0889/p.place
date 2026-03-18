@@ -1,7 +1,7 @@
 // Supabase Configuration
 // TODO: あなたのSupabaseプロジェクトのURLとAnon Keyに書き換えてください。
-const SUPABASE_URL = 'YOUR_SUPABASE_PROJECT_URL';
-const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+const SUPABASE_URL = 'https://lwuaavonmiwmxtthjtju.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx3dWFhdm9ubWl3bXh0dGhqdGp1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1NzQ1NTQsImV4cCI6MjA4OTE1MDU1NH0.bs35thHMO50xoi7lz_7adeqg6yOeHmh_jKlfR0xDsQ0';
 
 // グローバルスコープからsupabaseを取り出す（CDN読み込みの場合）
 const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
