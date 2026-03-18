@@ -1,8 +1,3 @@
-// Supabase Configuration
-const SUPABASE_URL = 'https://lwuaavonmiwmxtthjtju.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx3dWFhdm9ubWl3bXh0dGhqdGp1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1NzQ1NTQsImV4cCI6MjA4OTE1MDU1NH0.bs35thHMO50xoi7lz_7adeqg6yOeHmh_jKlfR0xDsQ0';
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
 // DOM Elements
 const container = document.getElementById('canvas-container');
 const wrapper = document.getElementById('canvas-wrapper');
@@ -15,6 +10,20 @@ const previewCtx = previewCanvas.getContext('2d', { alpha: true });
 const CANVAS_SIZE = 5000;
 const GRID_SIZE = 500;
 const PIXEL_SIZE = CANVAS_SIZE / GRID_SIZE; // 1マス10px
+
+// αチャンネルOFF時のデフォルト黒画面を防ぐため、スクリプト実行直後に白く塗る
+ctx.fillStyle = '#ffffff';
+ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+// Supabase Configuration
+const SUPABASE_URL = 'https://lwuaavonmiwmxtthjtju.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx3dWFhdm9ubWl3bXh0dGhqdGp1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1NzQ1NTQsImV4cCI6MjA4OTE1MDU1NH0.bs35thHMO50xoi7lz_7adeqg6yOeHmh_jKlfR0xDsQ0';
+let supabase = null;
+try {
+  supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+} catch (err) {
+  setTimeout(() => alert("【💡ヒント】\nSupabaseのURLが初期値のままか、間違っているため通信エラーが発生しました。\nscript.js の中の SUPABASE_URL と ANON_KEY を正しくセットしてください！"), 500);
+}
 
 // アプリケーションの状態
 let myColor = '#000000';
@@ -58,6 +67,8 @@ async function init() {
   updateTransform();
   setupUI();
 
+  if (!supabase) return; // Supabase設定エラー時は通信を行わない
+
   const { data: pixels, error } = await supabase.from('pixels').select('id, x, y, color');
   if (error) {
     console.error('データの取得に失敗しました:', error);
@@ -88,6 +99,7 @@ function putPixel(x, y) {
   drawPixelLocal(x, y, myColor);
   
   const id = `${x}_${y}`;
+  if (!supabase) return; // 未設定時は何もしない
   supabase.from('pixels').upsert({ id, x, y, color: myColor }).then(({ error }) => {
     if (error) console.error('ドットの配置に失敗:', error);
   });
@@ -163,7 +175,7 @@ function handlePointerDown(e) {
         }
       });
 
-      if (newRows.length > 0) {
+      if (newRows.length > 0 && supabase) {
         // バルクインサート（一括送信）
         supabase.from('pixels').upsert(newRows).then(({ error }) => {
           if (error) console.error('スタンプレースに失敗:', error);
