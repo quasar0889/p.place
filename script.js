@@ -19,14 +19,6 @@ const PIXEL_SIZE = CANVAS_SIZE / GRID_SIZE; // 1マス10px
 let myColor = '#000000';
 let activeTool = 'draw'; // 'draw' または 'move'
 
-// 描画・パン用の状態
-let isPointerDown = false;
-let isPanning = false;
-let lastLogicalX = null;
-let lastLogicalY = null;
-let lastPanX = 0;
-let lastPanY = 0;
-
 // ビューポート（移動・ズーム）の状態
 let scale = 1;
 if (window.innerWidth < 1000) scale = 0.2; // スマホなどでは最初引いて全体を見せる
@@ -45,9 +37,9 @@ function updateTransform() {
 }
 
 // 実際の画面のクリック位置から、ズームと移動を加味したキャンバス上のグリッド座標を割り出す
-function getLogicalPos(evt) {
-  const canvasLocalX = (evt.clientX - translateX) / scale;
-  const canvasLocalY = (evt.clientY - translateY) / scale;
+function getLogicalPos(screenX, screenY) {
+  const canvasLocalX = (screenX - translateX) / scale;
+  const canvasLocalY = (screenY - translateY) / scale;
   return {
     x: Math.floor(canvasLocalX / PIXEL_SIZE),
     y: Math.floor(canvasLocalY / PIXEL_SIZE)
@@ -115,58 +107,145 @@ function drawLine(x0, y0, x1, y1) {
   }
 }
 
-// --- マウス・タッチイベントリスナー --- //
-function handlePointerDown(evt) {
-  // UI上のクリックは除外
-  if (evt.target.closest('#ui-container')) return;
+// --- 高度なマルチタッチ・マウスイベントリスナー管理 --- //
+// 画面に触れている指（またはマウス）の情報を管理・追跡する
+const activePointers = new Map();
+
+// シングルタップ（1本指）での描画・パン用の状態
+let isDrawingPhase = false;
+let isPanningPhase = false;
+let lastLogicalX = null;
+let lastLogicalY = null;
+let lastPanX = 0;
+let lastPanY = 0;
+
+// マルチタッチ（2本指以上）でのパン・ズーム状態
+let lastPinchCenter = null;
+let lastPinchDistance = null;
+
+function handlePointerDown(e) {
+  // UI上の操作はキャンバスイベントとして発火しない
+  if (e.target.closest('#ui-container')) return;
   
-  isPointerDown = true;
-  lastPanX = evt.clientX;
-  lastPanY = evt.clientY;
+  // ポインターを記録（Chrome等のマルチタッチ対応）
+  activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-  // 右クリック、中クリック、または移動ツールの場合はパン（移動）モード
-  isPanning = activeTool === 'move' || evt.button === 1 || evt.button === 2;
-
-  if (!isPanning && activeTool === 'draw') {
-    const { x, y } = getLogicalPos(evt);
-    lastLogicalX = x;
-    lastLogicalY = y;
-    putPixel(x, y);
-  }
-}
-
-function handlePointerMove(evt) {
-  if (!isPointerDown) return;
-
-  if (isPanning) {
-    // 画面の移動処理
-    const dx = evt.clientX - lastPanX;
-    const dy = evt.clientY - lastPanY;
-    translateX += dx;
-    translateY += dy;
-    lastPanX = evt.clientX;
-    lastPanY = evt.clientY;
-    updateTransform();
-  } else if (activeTool === 'draw') {
-    // 描画処理
-    const { x, y } = getLogicalPos(evt);
-    if (x !== lastLogicalX || y !== lastLogicalY) {
-      if (lastLogicalX !== null && lastLogicalY !== null) {
-        drawLine(lastLogicalX, lastLogicalY, x, y); // スキマを埋める
-      } else {
-        putPixel(x, y);
-      }
+  if (activePointers.size === 1) {
+    // 【1本指・クリック】
+    // 中/右クリック、または「移動ツール」が選択されている場合
+    const isForcePan = e.button === 1 || e.button === 2;
+    if (activeTool === 'move' || isForcePan) {
+      isPanningPhase = true;
+      isDrawingPhase = false;
+      lastPanX = e.clientX;
+      lastPanY = e.clientY;
+    } else {
+      isPanningPhase = false;
+      isDrawingPhase = true;
+      const { x, y } = getLogicalPos(e.clientX, e.clientY);
       lastLogicalX = x;
       lastLogicalY = y;
+      putPixel(x, y);
     }
+  } else if (activePointers.size === 2) {
+    // 【2本指】
+    // 描画モード中であっても2本目の指が置かれたらすべてキャンセリングし、ズーム＆パンに移行
+    isDrawingPhase = false;
+    isPanningPhase = false;
+    
+    const ptrs = Array.from(activePointers.values());
+    const [p1, p2] = ptrs;
+    
+    lastPinchDistance = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    lastPinchCenter = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
   }
 }
 
-function handlePointerUp() {
-  isPointerDown = false;
-  isPanning = false;
-  lastLogicalX = null;
-  lastLogicalY = null;
+function handlePointerMove(e) {
+  if (!activePointers.has(e.pointerId)) return;
+  
+  // ポインター位置の更新
+  activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if (activePointers.size === 1) {
+    // 【1本指】
+    if (isPanningPhase) {
+      // 画面の移動処理
+      const dx = e.clientX - lastPanX;
+      const dy = e.clientY - lastPanY;
+      translateX += dx;
+      translateY += dy;
+      lastPanX = e.clientX;
+      lastPanY = e.clientY;
+      updateTransform();
+    } else if (isDrawingPhase) {
+      // 描画処理
+      const { x, y } = getLogicalPos(e.clientX, e.clientY);
+      if (x !== lastLogicalX || y !== lastLogicalY) {
+        if (lastLogicalX !== null && lastLogicalY !== null) {
+          drawLine(lastLogicalX, lastLogicalY, x, y); // スキマを埋める
+        } else {
+          putPixel(x, y);
+        }
+        lastLogicalX = x;
+        lastLogicalY = y;
+      }
+    }
+  } else if (activePointers.size === 2) {
+    // 【2本指】
+    e.preventDefault(); // デフォルトのスクロールなどを必ず防ぐ
+    
+    const ptrs = Array.from(activePointers.values());
+    const [p1, p2] = ptrs;
+    
+    const currentDistance = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    const currentCenter = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+
+    if (lastPinchCenter && lastPinchDistance) {
+      // 1. 移動（パン）
+      const dx = currentCenter.x - lastPinchCenter.x;
+      const dy = currentCenter.y - lastPinchCenter.y;
+      translateX += dx;
+      translateY += dy;
+
+      // 2. ズーム（拡大・縮小）
+      if (lastPinchDistance > 0) {
+        const zoomFactor = currentDistance / lastPinchDistance;
+        let newScale = scale * zoomFactor;
+        newScale = Math.max(MIN_SCALE, Math.min(newScale, MAX_SCALE));
+        
+        // 2本指の中心を基準にズーム
+        translateX = currentCenter.x - (currentCenter.x - translateX) * (newScale / scale);
+        translateY = currentCenter.y - (currentCenter.y - translateY) * (newScale / scale);
+        scale = newScale;
+      }
+      
+      updateTransform();
+    }
+    
+    // 次回の基準として保存
+    lastPinchDistance = currentDistance;
+    lastPinchCenter = currentCenter;
+  }
+}
+
+function handlePointerUpOrCancel(e) {
+  // 離れたポインターを削除
+  activePointers.delete(e.pointerId);
+
+  // 指の数が減ったらマルチタッチ状態をリセット
+  if (activePointers.size < 2) {
+    lastPinchCenter = null;
+    lastPinchDistance = null;
+  }
+
+  // もし1本の指が離れ、もう1本が残っているとしても一旦リセットする（不自然な挙動を防ぐ）
+  if (activePointers.size === 0 || activePointers.size === 1) {
+    isDrawingPhase = false;
+    isPanningPhase = false;
+    lastLogicalX = null;
+    lastLogicalY = null;
+  }
 }
 
 // マウスホイールでのズーム
@@ -191,51 +270,14 @@ function handleWheel(evt) {
   updateTransform();
 }
 
-// スマホのピンチ操作対応
-let initialPinchDistance = null;
-let initialScale = 1;
-container.addEventListener('touchstart', e => {
-  if (e.touches.length === 2) {
-    e.preventDefault();
-    initialPinchDistance = Math.hypot(
-      e.touches[0].clientX - e.touches[1].clientX,
-      e.touches[0].clientY - e.touches[1].clientY
-    );
-    initialScale = scale;
-  }
-}, {passive: false});
-
-container.addEventListener('touchmove', e => {
-  if (e.touches.length === 2 && initialPinchDistance) {
-    e.preventDefault();
-    const currentDistance = Math.hypot(
-      e.touches[0].clientX - e.touches[1].clientX,
-      e.touches[0].clientY - e.touches[1].clientY
-    );
-    const zoomFactor = currentDistance / initialPinchDistance;
-    let newScale = initialScale * zoomFactor;
-    newScale = Math.max(MIN_SCALE, Math.min(newScale, MAX_SCALE));
-    
-    // ピンチの中心点を計算
-    const centerX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-    const centerY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-    
-    translateX = centerX - (centerX - translateX) * (newScale / scale);
-    translateY = centerY - (centerY - translateY) * (newScale / scale);
-    scale = newScale;
-    updateTransform();
-  }
-}, {passive: false});
-
-container.addEventListener('touchend', e => {
-  if (e.touches.length < 2) initialPinchDistance = null;
-});
-
-// イベントリスナー登録
+// イベントリスナー登録 (Pointer Events APIを使用)
 container.addEventListener('pointerdown', handlePointerDown);
+// move, up, cancel は画面外でも追従できるように window にバインド
 window.addEventListener('pointermove', handlePointerMove, { passive: false });
-window.addEventListener('pointerup', handlePointerUp);
+window.addEventListener('pointerup', handlePointerUpOrCancel);
+window.addEventListener('pointercancel', handlePointerUpOrCancel);
 container.addEventListener('wheel', handleWheel, { passive: false });
+
 container.addEventListener('contextmenu', e => {
   if (!e.target.closest('#ui-container')) e.preventDefault(); // キャンバス上の右クリックメニューを無効化（移動に使うため）
 });
@@ -257,6 +299,9 @@ function setupUI() {
   
   // ショートカットキー対応 (P = Draw, H = Move)
   window.addEventListener('keydown', (e) => {
+    // インプット中に発火しないよう制御
+    if (e.target.tagName.toLowerCase() === 'input') return;
+    
     if (e.key.toLowerCase() === 'p') switchTool('draw');
     if (e.key.toLowerCase() === 'h') switchTool('move');
   });
